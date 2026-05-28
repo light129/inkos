@@ -216,8 +216,8 @@ export function Sidebar({ nav, activePage, sse, t }: {
     const sessionId = createDraftSession(null);
     setProjectChatSessionId(sessionId);
     setInput(kind === "short"
-      ? "我要做一篇 InkOS Short 短篇，方向是："
-      : "开一个 InkOS Play 互动世界，我扮演：");
+      ? "InkOS Short：我想从这里开始："
+      : "InkOS Play：我想从这里开始：");
     nav.toChat();
   };
 
