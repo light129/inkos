@@ -3,6 +3,8 @@ import { PipelineRunner, type PipelineConfig } from "./runner.js";
 import { normalizePlatformOrOther, type Genre } from "../models/book.js";
 import { DEFAULT_REVISE_MODE, type ReviseMode } from "../agents/reviser.js";
 import { deriveBookIdFromTitle } from "../utils/book-id.js";
+import { inferLanguage } from "../utils/language.js";
+import { defaultChapterLength } from "../utils/length-metrics.js";
 
 /** Tool definitions for the agent loop. */
 const TOOLS: ReadonlyArray<ToolDefinition> = [
@@ -422,6 +424,8 @@ export async function executeAgentTool(
       const now = new Date().toISOString();
       const title = args.title as string;
       const bookId = deriveBookIdFromTitle(title) || `book-${Date.now().toString(36)}`;
+      const brief = args.brief as string | undefined;
+      const language = inferLanguage(brief ?? title);
 
       const book = {
         id: bookId,
@@ -430,12 +434,12 @@ export async function executeAgentTool(
         genre: ((args.genre as string) ?? "xuanhuan") as Genre,
         status: "outlining" as const,
         targetChapters: 200,
-        chapterWordCount: 3000,
+        chapterWordCount: defaultChapterLength(language),
+        language,
         createdAt: now,
         updatedAt: now,
       };
 
-      const brief = args.brief as string | undefined;
       if (brief) {
         const contextPipeline = new PipelineRunner({ ...config, externalContext: brief });
         await contextPipeline.initBook(book);

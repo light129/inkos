@@ -3,6 +3,7 @@ import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@mario
 import type { PipelineRunner } from "../pipeline/runner.js";
 import { type ReviseMode } from "../agents/reviser.js";
 import { defaultChapterLength } from "../utils/length-metrics.js";
+import { inferLanguage } from "../utils/language.js";
 import { readFile, writeFile, readdir, stat } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { StateManager } from "../state/manager.js";
@@ -276,6 +277,7 @@ export function createSubAgentTool(
               ? assertSafeBookId(bookId, "architect.bookId")
               : deriveBookIdFromTitle(resolvedTitle) || `book-${Date.now().toString(36)}`;
             const now = new Date().toISOString();
+            const resolvedLanguage = language ?? inferLanguage(instruction);
             progress(`Starting architect for book "${id}"...`);
             await pipeline.initBook(
               {
@@ -283,10 +285,10 @@ export function createSubAgentTool(
                 title: resolvedTitle,
                 genre: genre ?? "general",
                 platform: normalizePlatformOrOther(platform),
-                language: (language ?? "zh") as any,
+                language: resolvedLanguage as any,
                 status: "outlining" as any,
                 targetChapters: targetChapters ?? 200,
-                chapterWordCount: chapterWordCount ?? defaultChapterLength(language === "en" ? "en" : "zh"),
+                chapterWordCount: chapterWordCount ?? defaultChapterLength(resolvedLanguage),
                 createdAt: now,
                 updatedAt: now,
               },
