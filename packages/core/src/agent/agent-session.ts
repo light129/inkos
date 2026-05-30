@@ -2,8 +2,19 @@ import { randomUUID } from "node:crypto";
 import { Agent } from "@mariozechner/pi-agent-core";
 import type { AgentEvent, AgentMessage } from "@mariozechner/pi-agent-core";
 import { streamSimple, getModel, getEnvApiKey } from "@mariozechner/pi-ai";
-import type { Model, Api, AssistantMessage, Message, ToolResultMessage, UserMessage } from "@mariozechner/pi-ai";
+import type {
+  Model,
+  Api,
+  AssistantMessage,
+  AssistantMessageEventStream,
+  Context as PiContext,
+  Message,
+  SimpleStreamOptions,
+  ToolResultMessage,
+  UserMessage,
+} from "@mariozechner/pi-ai";
 import type { PipelineRunner } from "../pipeline/runner.js";
+import { assertWithinContextWindow, estimatePiContextTokens } from "../llm/provider.js";
 import { buildAgentSystemPrompt } from "./agent-system-prompt.js";
 import {
   createPatchChapterTextTool,
@@ -161,6 +172,25 @@ function sessionQueueKey(projectRoot: string, sessionId: string): string {
 
 function agentCacheKey(projectRoot: string, sessionId: string): string {
   return sessionQueueKey(projectRoot, sessionId);
+}
+
+function guardedStreamSimple<TApi extends Api>(
+  model: Model<TApi>,
+  context: PiContext,
+  options?: SimpleStreamOptions,
+): AssistantMessageEventStream {
+  const reservedOutputTokens = Number.isFinite(options?.maxTokens)
+    ? options!.maxTokens!
+    : Number.isFinite(model.maxTokens)
+      ? model.maxTokens
+      : 4096;
+  assertWithinContextWindow({
+    piModel: model,
+    model: model.id,
+    estimatedInputTokens: estimatePiContextTokens(context),
+    reservedOutputTokens,
+  });
+  return streamSimple(model, context, options);
 }
 
 async function runInAgentSessionQueue<T>(
@@ -636,7 +666,7 @@ async function runAgentSessionUnlocked(
       },
       transformContext: createBookContextTransform(bookId, projectRoot),
       convertToLlm: (messages) => convertAgentMessagesForModel(messages, model),
-      streamFn: streamSimple,
+      streamFn: guardedStreamSimple,
       getApiKey: (provider: string) => {
         if (config.apiKey) return config.apiKey;
         return getEnvApiKey(provider);

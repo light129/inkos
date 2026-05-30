@@ -368,11 +368,19 @@ export function __resetFixedTemperatureWarnings(): void {
   warnedFixedTemperatureModels.clear();
 }
 
-function estimateTextTokens(text: string): number {
+export function estimateTextTokens(text: string): number {
   if (!text) return 0;
   const cjk = text.match(/[\u3400-\u9fff]/g)?.length ?? 0;
   const nonCjk = text.length - cjk;
   return Math.ceil(cjk + nonCjk / 4);
+}
+
+function estimateJsonTokens(value: unknown): number {
+  try {
+    return estimateTextTokens(JSON.stringify(value) ?? "");
+  } catch {
+    return estimateTextTokens(String(value));
+  }
 }
 
 function estimateLLMMessagesTokens(messages: ReadonlyArray<LLMMessage>): number {
@@ -404,7 +412,62 @@ function estimateToolsTokens(tools: ReadonlyArray<ToolDefinition>): number {
   return estimateTextTokens(JSON.stringify(tools));
 }
 
-function assertWithinContextWindow(params: {
+type PiMessageContent = PiContext["messages"][number]["content"];
+
+function estimatePiContentTokens(content: PiMessageContent): number {
+  if (typeof content === "string") return estimateTextTokens(content);
+  let total = 0;
+  for (const block of content) {
+    if (block.type === "text") {
+      total += estimateTextTokens(typeof block.text === "string" ? block.text : "");
+      continue;
+    }
+    if (block.type === "thinking") {
+      total += estimateTextTokens(typeof block.thinking === "string" ? block.thinking : "");
+      continue;
+    }
+    if (block.type === "toolCall") {
+      total += estimateTextTokens(typeof block.name === "string" ? block.name : "");
+      total += estimateTextTokens(typeof block.id === "string" ? block.id : "");
+      total += estimateJsonTokens(block.arguments);
+      continue;
+    }
+    if (block.type === "image") {
+      total += estimateTextTokens(typeof block.mimeType === "string" ? block.mimeType : "");
+      total += estimateTextTokens(typeof block.data === "string" ? block.data : "");
+      continue;
+    }
+    total += estimateJsonTokens(block);
+  }
+  return total;
+}
+
+export function estimatePiContextTokens(context: PiContext): number {
+  let total = estimateTextTokens(context.systemPrompt ?? "");
+  for (const message of context.messages) {
+    total += estimateTextTokens(message.role);
+    if (message.role === "assistant") {
+      total += estimatePiContentTokens(message.content);
+      total += estimateTextTokens(message.model ?? "");
+      total += estimateTextTokens(message.provider ?? "");
+      total += estimateTextTokens(message.api ?? "");
+      continue;
+    }
+    if (message.role === "toolResult") {
+      total += estimateTextTokens(message.toolCallId);
+      total += estimateTextTokens(message.toolName);
+      total += estimatePiContentTokens(message.content);
+      continue;
+    }
+    total += estimatePiContentTokens(message.content);
+  }
+  if (context.tools && context.tools.length > 0) {
+    total += estimateJsonTokens(context.tools);
+  }
+  return total;
+}
+
+export function assertWithinContextWindow(params: {
   readonly piModel: PiModel<PiApi>;
   readonly model: string;
   readonly estimatedInputTokens: number;

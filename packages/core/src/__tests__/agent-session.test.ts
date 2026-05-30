@@ -176,6 +176,7 @@ describe("runAgentSession cache — bookId switch", () => {
     evictAgentCache("s-error");
     evictAgentCache("s-project-root-cache");
     evictAgentCache("s-interleave-seq");
+    evictAgentCache("s-context-window");
     await rm(projectRoot, { recursive: true, force: true });
     if (otherProjectRoot) await rm(otherProjectRoot, { recursive: true, force: true });
   });
@@ -250,6 +251,38 @@ describe("runAgentSession cache — bookId switch", () => {
     );
 
     expect(agentInstances).toHaveLength(1);
+  });
+
+  it("guards pi-agent stream context before calling streamSimple", async () => {
+    const model = {
+      provider: "x",
+      id: "tiny-window",
+      name: "tiny-window",
+      api: "anthropic-messages",
+      baseUrl: "",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 20,
+      maxTokens: 10,
+    } as any;
+    const pipeline = {} as any;
+
+    const result = await runAgentSession(
+      { sessionId: "s-context-window", bookId: "book-a", language: "zh", pipeline, projectRoot, model },
+      "hi",
+    );
+
+    expect(result.responseText).toBe("");
+    expect(result.errorMessage).toContain("InkOS context window guard");
+    expect(streamCalls).toHaveLength(0);
+    const events = await readTranscriptEvents(projectRoot, "s-context-window");
+    expect(events.some(
+      (event: any) =>
+        event.type === "request_failed" &&
+        typeof event.error === "string" &&
+        event.error.includes("InkOS context window guard"),
+    )).toBe(true);
   });
 
   it("reuses Agent when bookId unchanged on same sessionId", async () => {
