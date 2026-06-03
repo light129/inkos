@@ -166,6 +166,33 @@ function buildTitleCatalog(
   return [...head, marker, ...tail].join("\n");
 }
 
+/**
+ * Build the architect external-context for a side-story (番外) foundation: frame
+ * it as a companion work that reuses the parent canon's cast/world but tells an
+ * independent side plot, and attach the parent canon as reference material.
+ */
+export function buildSpinoffFoundationContext(
+  parentCanon: string,
+  direction: string | undefined,
+  language: "zh" | "en",
+): string {
+  const dir = direction?.trim();
+  if (language === "en") {
+    return [
+      "## This is a SIDE-STORY (番外)",
+      "Reuse the established characters, world, and rules from the parent canon below. Tell an INDEPENDENT side plot — a bonus arc, a character backstory, or a what-if — that does NOT advance or contradict the parent work's main storyline.",
+      dir ? `\n## Side-story direction\n${dir}` : "",
+      `\n## Parent canon (reuse these characters and settings)\n${parentCanon}`,
+    ].filter(Boolean).join("\n");
+  }
+  return [
+    "## 这是一部番外",
+    "复用下方正传正典里已确立的角色、世界观与规则。讲一个独立的侧篇故事——支线、角色前传或 what-if——不要推进或违背正传的主线剧情。",
+    dir ? `\n## 番外方向\n${dir}` : "",
+    `\n## 正传正典（复用以下角色与设定）\n${parentCanon}`,
+  ].filter(Boolean).join("\n");
+}
+
 export function buildImportFoundationSource(
   chapters: ReadonlyArray<{ readonly title: string; readonly content: string }>,
   language: LengthLanguage,
@@ -906,6 +933,70 @@ export class PipelineRunner {
     await mkdir(join(bookDir, "chapters"), { recursive: true });
     await this.state.saveChapterIndex(book.id, []);
     await this.state.snapshotState(book.id, 0);
+  }
+
+  /**
+   * Create a side-story (番外) book: a standalone companion that inherits a
+   * parent book's world/characters via parent_canon.md, but tells an INDEPENDENT
+   * side plot that does not advance or contradict the parent's main-line state.
+   * Reuses importCanon (which already builds the parent-canon reference for
+   * side-story writing) + the standard original-foundation architect path.
+   */
+  async initSpinoffBook(book: BookConfig, parentBookId: string, direction?: string): Promise<void> {
+    const bookDir = this.state.bookDir(book.id);
+    const stageLanguage = await this.resolveBookLanguage(book);
+
+    this.logStage(stageLanguage, { zh: "保存书籍配置", en: "saving book config" });
+    await this.state.saveBookConfig(book.id, book);
+
+    this.logStage(stageLanguage, { zh: "导入正传正典参照", en: "importing parent canon" });
+    const parentCanon = await this.importCanon(book.id, parentBookId);
+
+    const architect = new ArchitectAgent(this.agentCtxFor("architect", book.id));
+    const reviewer = new FoundationReviewerAgent(this.agentCtxFor("foundation-reviewer", book.id));
+    const { profile: gp } = await this.loadGenreProfile(book.genre);
+    const resolvedLanguage = (book.language ?? gp.language) === "en" ? "en" as const : "zh" as const;
+    const spinoffContext = buildSpinoffFoundationContext(parentCanon, direction, resolvedLanguage);
+
+    this.logStage(stageLanguage, { zh: "生成番外基础设定", en: "generating side-story foundation" });
+    const foundation = await this.generateAndReviewFoundation({
+      generate: (reviewFeedback) => architect.generateFoundation(book, spinoffContext, reviewFeedback),
+      reviewer,
+      mode: "original",
+      language: resolvedLanguage,
+      stageLanguage,
+    });
+
+    this.logStage(stageLanguage, { zh: "写入基础设定文件", en: "writing foundation files" });
+    await architect.writeFoundationFiles(bookDir, foundation, gp.numericalSystem, book.language ?? gp.language);
+
+    this.logStage(stageLanguage, { zh: "初始化控制文档", en: "initializing control documents" });
+    await this.state.ensureControlDocuments(book.id, direction?.trim() || this.config.externalContext);
+
+    this.logStage(stageLanguage, { zh: "创建初始快照", en: "creating initial snapshot" });
+    await mkdir(join(bookDir, "chapters"), { recursive: true });
+    await this.state.saveChapterIndex(book.id, []);
+    await this.state.snapshotState(book.id, 0);
+  }
+
+  /**
+   * Create an imitation (仿写) book: an ORIGINAL story whose prose imitates the
+   * voice of a reference work. The architect builds an original foundation from
+   * the user's story idea; the reference text becomes the book's style_guide.md
+   * so the writer mimics its style. The style guide is mandatory here (imitation
+   * is the whole point), so a failure to generate it surfaces rather than being
+   * silently skipped.
+   */
+  async initImitationBook(
+    book: BookConfig,
+    referenceText: string,
+    storyIdea: string,
+    sourceName?: string,
+  ): Promise<void> {
+    await this.initBook(book, { externalContext: storyIdea });
+    const stageLanguage = await this.resolveBookLanguage(book);
+    this.logStage(stageLanguage, { zh: "提取参考作品风格指纹", en: "extracting reference style fingerprint" });
+    await this.generateStyleGuide(book.id, referenceText, sourceName?.trim() || "reference");
   }
 
   /** Write a single draft chapter. Saves chapter file + truth files + index + snapshot. */
