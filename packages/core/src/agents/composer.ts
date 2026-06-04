@@ -113,13 +113,11 @@ async function collectSelectedContext(
         }];
 
     const entries = await Promise.all([
-      maybeContextSource(storyDir, "current_focus.md", "Current task focus for this chapter.", [], { preserveFull: true }),
+      maybeContextSource(storyDir, "current_focus.md", "Current task focus for this chapter."),
       maybeContextSource(
         storyDir,
         "author_intent.md",
         "User's long-term authorial intent and direction — binding, overrides model defaults.",
-        [],
-        { preserveFull: true },
       ),
       maybeContextSource(
         storyDir,
@@ -130,19 +128,16 @@ async function collectSelectedContext(
         storyDir,
         "current_state.md",
         "Preserve hard state facts referenced by the active chapter brief or hard constraints.",
-        retrievalHints,
       ),
       maybeContextSource(
         storyDir,
         "outline/story_frame.md",
         "Preserve canon constraints referenced by the active chapter brief or hard constraints.",
-        retrievalHints,
       ),
       maybeContextSource(
         storyDir,
         "outline/volume_map.md",
         "Anchor the default planning node for this chapter.",
-        plan.intent.outlineNode ? [plan.intent.outlineNode] : [],
       ),
       maybeContextSource(
         storyDir,
@@ -375,8 +370,6 @@ async function maybeContextSource(
   storyDir: string,
   fileName: string,
   reason: string,
-  preferredExcerpts: ReadonlyArray<string> = [],
-  options: { readonly preserveFull?: boolean } = {},
 ): Promise<ContextPackage["selectedContext"][number] | null> {
     const path = join(storyDir, fileName);
     let content = await readFileOrDefault(path);
@@ -401,7 +394,7 @@ async function maybeContextSource(
     return {
       source: `story/${resolvedFileName}`,
       reason,
-      excerpt: options.preserveFull ? content.trim() : pickExcerpt(content, preferredExcerpts),
+      excerpt: content.trim(),
     };
 }
 
@@ -409,17 +402,6 @@ function outlineFallback(fileName: string): string | null {
     if (fileName === "outline/story_frame.md") return "story_bible.md";
     if (fileName === "outline/volume_map.md") return "volume_outline.md";
     return null;
-}
-
-function pickExcerpt(content: string, preferredExcerpts: ReadonlyArray<string>): string | undefined {
-    for (const preferred of preferredExcerpts) {
-      if (preferred && content.includes(preferred)) return preferred;
-    }
-
-    return content
-      .split("\n")
-      .map((line) => line.trim())
-      .find((line) => line.length > 0 && !line.startsWith("#"));
 }
 
 function toFactAnchor(predicate: string): string {

@@ -157,6 +157,42 @@ describe("ComposerAgent", () => {
     expect(authorIntentEntry?.excerpt).toContain("我不再替别人背债");
   });
 
+  it("preserves later canon constraints from file context instead of first-line excerpts", async () => {
+    await writeFile(
+      join(storyDir, "parent_canon.md"),
+      [
+        "# Parent Canon",
+        "",
+        "档案编号：旧城案",
+        "",
+        "父本正典约束：导师直到第二卷才知道档案馆火灾。",
+        "本章不能提前泄露档案馆火灾的真正纵火者。",
+      ].join("\n"),
+      "utf-8",
+    );
+
+    const composer = new ComposerAgent({
+      client: {} as ConstructorParameters<typeof ComposerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const result = await composer.composeChapter({
+      book,
+      bookDir,
+      chapterNumber: 4,
+      plan,
+    });
+
+    const parentCanonEntry = result.contextPackage.selectedContext.find((entry) =>
+      entry.source === "story/parent_canon.md",
+    );
+    expect(parentCanonEntry?.excerpt).toContain("档案编号：旧城案");
+    expect(parentCanonEntry?.excerpt).toContain("导师直到第二卷才知道档案馆火灾");
+    expect(parentCanonEntry?.excerpt).toContain("不能提前泄露档案馆火灾的真正纵火者");
+  });
+
   it("emits a rule stack with hard, soft, and diagnostic sections", async () => {
     const composer = new ComposerAgent({
       client: {} as ConstructorParameters<typeof ComposerAgent>[0]["client"],
