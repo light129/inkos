@@ -16,15 +16,35 @@ import {
 import {
   buildGovernedRuleStack,
   buildGovernedTrace,
+  isProtectedContextSource,
 } from "../utils/context-assembly.js";
 import { writeGovernedRuntimeArtifacts } from "../utils/runtime-writer.js";
+import { estimateTextTokens, type LLMClient } from "../llm/provider.js";
 
 export interface ComposeChapterInput {
   readonly book: BookConfig;
   readonly bookDir: string;
   readonly chapterNumber: number;
   readonly plan: PlanChapterOutput;
+  readonly contextBudget?: ContextBudget;
+  readonly compressibleContextCompiler?: CompressibleContextCompiler;
 }
+
+export interface ContextBudget {
+  readonly contextWindowTokens: number;
+  readonly reservedOutputTokens: number;
+}
+
+export interface CompressibleContextCompileRequest {
+  readonly chapterNumber: number;
+  readonly goal: string;
+  readonly language: "zh" | "en";
+  readonly maxInputTokens: number;
+  readonly protectedEntries: ContextPackage["selectedContext"];
+  readonly compressibleEntries: ContextPackage["selectedContext"];
+}
+
+export type CompressibleContextCompiler = (request: CompressibleContextCompileRequest) => Promise<string>;
 
 export interface ComposeChapterOutput {
   readonly contextPackage: ContextPackage;
@@ -45,10 +65,19 @@ export async function composeGovernedChapter(input: ComposeChapterInput): Promis
     input.plan,
     input.book.language ?? "zh",
   );
-  const contextPackage = ContextPackageSchema.parse({
+  const initialContextPackage = ContextPackageSchema.parse({
     chapter: input.chapterNumber,
     selectedContext,
   });
+  const budgeted = await applyContextBudgetIfNeeded({
+    contextPackage: initialContextPackage,
+    chapterNumber: input.chapterNumber,
+    goal: input.plan.intent.goal,
+    language: input.book.language ?? "zh",
+    contextBudget: input.contextBudget,
+    compiler: input.compressibleContextCompiler,
+  });
+  const contextPackage = budgeted.contextPackage;
 
   const ruleStack = buildGovernedRuleStack(input.plan, input.chapterNumber);
   const trace = buildGovernedTrace({
@@ -56,6 +85,7 @@ export async function composeGovernedChapter(input: ComposeChapterInput): Promis
     plan: input.plan,
     contextPackage,
     composerInputs: [input.plan.runtimePath],
+    notes: budgeted.notes,
   });
   const {
     contextPath,
@@ -79,14 +109,163 @@ export async function composeGovernedChapter(input: ComposeChapterInput): Promis
   };
 }
 
+async function applyContextBudgetIfNeeded(params: {
+  readonly contextPackage: ContextPackage;
+  readonly chapterNumber: number;
+  readonly goal: string;
+  readonly language: "zh" | "en";
+  readonly contextBudget?: ContextBudget;
+  readonly compiler?: CompressibleContextCompiler;
+}): Promise<{ readonly contextPackage: ContextPackage; readonly notes: string[] }> {
+  const budget = params.contextBudget;
+  if (!budget || budget.contextWindowTokens <= 0) {
+    return { contextPackage: params.contextPackage, notes: [] };
+  }
+
+  const availableInputTokens = budget.contextWindowTokens - Math.max(0, budget.reservedOutputTokens);
+  const selectedContext = params.contextPackage.selectedContext;
+  const totalTokens = estimateSelectedContextTokens(selectedContext);
+  if (totalTokens <= availableInputTokens) {
+    return { contextPackage: params.contextPackage, notes: [] };
+  }
+
+  const protectedEntries = selectedContext.filter((entry) => isProtectedContextSource(entry.source));
+  const compressibleEntries = selectedContext.filter((entry) => !isProtectedContextSource(entry.source));
+  const protectedTokens = estimateSelectedContextTokens(protectedEntries);
+  if (protectedTokens > availableInputTokens) {
+    throw new Error(
+      `Protected context exceeds available input budget (${protectedTokens}/${availableInputTokens} tokens). ` +
+      "InkOS will not compress protected author intent, current focus, hard state, or active hook evidence.",
+    );
+  }
+  if (compressibleEntries.length === 0) {
+    return { contextPackage: params.contextPackage, notes: ["context-over-budget-no-compressible-entries"] };
+  }
+  if (!params.compiler) {
+    throw new Error(
+      `Context exceeds available input budget (${totalTokens}/${availableInputTokens} tokens), ` +
+      "but no compressible context compiler was provided.",
+    );
+  }
+
+  const compiled = (await params.compiler({
+    chapterNumber: params.chapterNumber,
+    goal: params.goal,
+    language: params.language,
+    maxInputTokens: Math.max(1, availableInputTokens - protectedTokens),
+    protectedEntries,
+    compressibleEntries,
+  })).trim();
+  if (!compiled) {
+    throw new Error("Compressible context compiler returned empty output.");
+  }
+
+  return {
+    contextPackage: ContextPackageSchema.parse({
+      chapter: params.contextPackage.chapter,
+      selectedContext: [
+        ...protectedEntries,
+        {
+          source: "runtime/compiled-compressible-context",
+          reason: "Semantic compilation of lower-priority context after protected context exceeded the input budget.",
+          excerpt: compiled,
+        },
+      ],
+    }),
+    notes: ["compiled-compressible-context"],
+  };
+}
+
+function estimateSelectedContextTokens(entries: ContextPackage["selectedContext"]): number {
+  return entries.reduce((total, entry) => (
+    total + estimateTextTokens([entry.source, entry.reason, entry.excerpt].filter(Boolean).join("\n"))
+  ), 0);
+}
+
+function renderContextEntries(entries: ContextPackage["selectedContext"]): string {
+  return entries.map((entry) =>
+    [
+      `### ${entry.source}`,
+      `Reason: ${entry.reason}`,
+      entry.excerpt ? entry.excerpt : "(no excerpt)",
+    ].join("\n"),
+  ).join("\n\n");
+}
+
 export class ComposerAgent extends BaseAgent {
   get name(): string {
     return "composer";
   }
 
   async composeChapter(input: ComposeChapterInput): Promise<ComposeChapterOutput> {
-    return composeGovernedChapter(input);
+    const contextBudget = input.contextBudget ?? contextBudgetFromClient(this.ctx.client);
+    return composeGovernedChapter({
+      ...input,
+      contextBudget,
+      compressibleContextCompiler: input.compressibleContextCompiler
+        ?? (contextBudget ? (request) => this.compileCompressibleContext(request) : undefined),
+    });
   }
+
+  async compileCompressibleContext(request: CompressibleContextCompileRequest): Promise<string> {
+    const isEn = request.language === "en";
+    const protectedBlock = renderContextEntries(request.protectedEntries);
+    const compressibleBlock = renderContextEntries(request.compressibleEntries);
+    const system = isEn
+      ? [
+          "You are InkOS's semantic context compiler.",
+          "Only compile the COMPRESSIBLE CONTEXT. The PROTECTED CONTEXT is binding reference material and must not be rewritten, summarized as a substitute, or weakened.",
+          "Output concise Markdown with source pointers. Preserve names, unresolved promises, evidence, timing, and constraints that may affect the next chapter. Drop low-relevance noise.",
+        ].join("\n")
+      : [
+          "你是 InkOS 的语义上下文编译器。",
+          "只能编译【可压缩上下文】。【受保护上下文】是绑定参照，不得改写、不得替代总结、不得削弱。",
+          "输出简洁 Markdown，保留来源指针。保留会影响下一章的人名、未兑现承诺、证据、时间点和约束，丢弃低相关噪声。",
+        ].join("\n");
+    const user = isEn
+      ? [
+          `Chapter: ${request.chapterNumber}`,
+          `Goal: ${request.goal}`,
+          `Target budget for compiled context: <= ${request.maxInputTokens} estimated input tokens`,
+          "",
+          "## Protected Context (reference only, do not compile)",
+          protectedBlock || "(none)",
+          "",
+          "## Compressible Context (compile this)",
+          compressibleBlock || "(none)",
+        ].join("\n")
+      : [
+          `章节：第${request.chapterNumber}章`,
+          `目标：${request.goal}`,
+          `压缩后目标预算：不超过 ${request.maxInputTokens} 估算输入 tokens`,
+          "",
+          "## 受保护上下文（只作为参照，不要编译它）",
+          protectedBlock || "（无）",
+          "",
+          "## 可压缩上下文（只编译这一部分）",
+          compressibleBlock || "（无）",
+        ].join("\n");
+
+    const response = await this.chat([
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ], {
+      temperature: 0.2,
+      maxTokens: Math.min(8192, Math.max(512, request.maxInputTokens)),
+    });
+    return response.content.trim();
+  }
+}
+
+export function contextBudgetFromClient(client: LLMClient): ContextBudget | undefined {
+  const contextWindowTokens = client._piModel?.contextWindow;
+  if (!Number.isFinite(contextWindowTokens) || !contextWindowTokens || contextWindowTokens <= 0) {
+    return undefined;
+  }
+  return {
+    contextWindowTokens,
+    reservedOutputTokens: Math.max(0, client.defaults.maxTokens),
+  };
 }
 
 async function collectSelectedContext(

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BookConfig } from "../models/book.js";
 import type { PlanChapterOutput } from "../agents/planner.js";
-import { ComposerAgent } from "../agents/composer.js";
+import { ComposerAgent, composeGovernedChapter } from "../agents/composer.js";
 
 const require = createRequire(import.meta.url);
 const hasNodeSqlite = (() => {
@@ -253,6 +253,66 @@ describe("ComposerAgent", () => {
     // trace.notes dropped with ChapterConflict removal (Phase 1 transitional)
     expect(result.trace.notes).toEqual([]);
     await expect(readFile(result.tracePath, "utf-8")).resolves.toContain("story/current_focus.md");
+  });
+
+  it("compiles only compressible context when selected context exceeds budget", async () => {
+    const longTitle = `旧章标题${"旧案".repeat(800)}`;
+    await writeFile(
+      join(storyDir, "chapter_summaries.md"),
+      [
+        "# Chapter Summaries",
+        "",
+        "| chapter | title | characters | events | stateChanges | hookActivity | mood | chapterType |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        `| 1 | ${longTitle} | Lin Yue | Old archive noise | None | none | tight | investigation |`,
+        "| 2 | Second Trail | Lin Yue | More old trail noise | None | none | tight | investigation |",
+        "",
+      ].join("\n"),
+      "utf-8",
+    );
+
+    let compileRequest: {
+      protectedSources: string[];
+      compressibleSources: string[];
+    } | undefined;
+
+    const result = await composeGovernedChapter({
+      book,
+      bookDir,
+      chapterNumber: 4,
+      plan,
+      contextBudget: {
+        contextWindowTokens: 900,
+        reservedOutputTokens: 0,
+      },
+      compressibleContextCompiler: async (request: {
+        readonly protectedEntries: ReadonlyArray<{ readonly source: string }>;
+        readonly compressibleEntries: ReadonlyArray<{ readonly source: string }>;
+      }) => {
+        compileRequest = {
+          protectedSources: request.protectedEntries.map((entry) => entry.source),
+          compressibleSources: request.compressibleEntries.map((entry) => entry.source),
+        };
+        return "压缩后的旧章标题历史：只保留旧案连续调查的节奏提醒。";
+      },
+    });
+
+    const sources = result.contextPackage.selectedContext.map((entry) => entry.source);
+    const authorIntent = result.contextPackage.selectedContext.find((entry) =>
+      entry.source === "story/author_intent.md",
+    );
+    const compiled = result.contextPackage.selectedContext.find((entry) =>
+      entry.source === "runtime/compiled-compressible-context",
+    );
+
+    expect(compileRequest).toBeDefined();
+    expect(compileRequest!.protectedSources).toContain("story/author_intent.md");
+    expect(compileRequest!.compressibleSources).toContain("story/chapter_summaries.md#recent_titles");
+    expect(sources).toContain("story/author_intent.md");
+    expect(sources).not.toContain("story/chapter_summaries.md#recent_titles");
+    expect(authorIntent?.excerpt).toContain("Keep the pressure on the mentor conflict.");
+    expect(compiled?.excerpt).toContain("压缩后的旧章标题历史");
+    expect(result.trace.notes).toContain("compiled-compressible-context");
   });
 
   it("retrieves summary and hook evidence chunks instead of whole long memory files", async () => {

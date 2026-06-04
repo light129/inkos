@@ -8,7 +8,7 @@ import type { GenreProfile } from "../models/genre-profile.js";
 import { ArchitectAgent, type ArchitectOutput } from "../agents/architect.js";
 import { FoundationReviewerAgent } from "../agents/foundation-reviewer.js";
 import { PlannerAgent, type PlanChapterOutput } from "../agents/planner.js";
-import { composeGovernedChapter, type ComposeChapterOutput } from "../agents/composer.js";
+import { ComposerAgent, composeGovernedChapter, contextBudgetFromClient, type ComposeChapterOutput } from "../agents/composer.js";
 import { WriterAgent, type WriteChapterInput, type WriteChapterOutput } from "../agents/writer.js";
 import { LengthNormalizerAgent } from "../agents/length-normalizer.js";
 import { ChapterAnalyzerAgent } from "../agents/chapter-analyzer.js";
@@ -3519,11 +3519,15 @@ ${matrix}`,
     composed: ComposeChapterOutput;
   }> {
     const plan = await this.resolveGovernedPlan(book, bookDir, chapterNumber, externalContext, options);
+    const composerCtx = this.agentCtxFor("composer", book.id);
+    const composer = new ComposerAgent(composerCtx);
     const composed = await composeGovernedChapter({
       book,
       bookDir,
       chapterNumber,
       plan,
+      contextBudget: contextBudgetFromClient(composerCtx.client),
+      compressibleContextCompiler: (request) => composer.compileCompressibleContext(request),
     });
 
     return { plan, composed };

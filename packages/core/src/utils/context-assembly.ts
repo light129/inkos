@@ -88,6 +88,7 @@ export function buildGovernedTrace(params: {
   readonly plan: PlanChapterOutput;
   readonly contextPackage: ContextPackage;
   readonly composerInputs: ReadonlyArray<string>;
+  readonly notes?: ReadonlyArray<string>;
 }): ChapterTrace {
   const protectedEntries = params.contextPackage.selectedContext.filter((entry) =>
     isProtectedContextSource(entry.source),
@@ -112,11 +113,11 @@ export function buildGovernedTrace(params: {
       compressibleTokens,
       totalSelectedTokens: protectedTokens + compressibleTokens,
     },
-    notes: [],
+    notes: params.notes ?? [],
   });
 }
 
-function isProtectedContextSource(source: string): boolean {
+export function isProtectedContextSource(source: string): boolean {
   return source === "runtime/chapter_memo"
     || source === "story/current_focus.md"
     || source === "story/author_intent.md"
