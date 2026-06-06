@@ -16,6 +16,7 @@ import {
   ShortFictionOutlineReviserAgent,
   ShortFictionPackagingAgent,
   ShortFictionWriterAgent,
+  findEmptyShortFictionChapters,
   renderShortFictionDraftMarkdown,
   validateShortFictionDraftForFinal,
   type ShortFictionBatchDraft,
@@ -191,49 +192,89 @@ async function produceShort(
     outlineMarkdown = outlineV2.rawContent;
   }
 
-  options.onProgress?.("Writing full short fiction draft...");
-  const writer = new ShortFictionWriterAgent(options.runtimes.writer);
-  const draftV1 = await writer.writeDraft({
-    direction: options.direction,
-    outlineMarkdown,
-    chapterCount,
-    charsPerChapter,
-  });
-  await writeDraftArtifacts(root, baseDir, "v001", draftV1);
+  let finalDraft: ShortFictionBatchDraft;
+  let revisionWarning: string | undefined;
+  let salesPackage: ShortFictionSalesPackage;
+  try {
+    options.onProgress?.("Writing full short fiction draft...");
+    const writer = new ShortFictionWriterAgent(options.runtimes.writer);
+    let draftV1 = await writer.writeDraft({
+      direction: options.direction,
+      outlineMarkdown,
+      chapterCount,
+      charsPerChapter,
+    });
+    const missingFromInitialDraft = findEmptyShortFictionChapters(draftV1);
+    if (missingFromInitialDraft.length > 0) {
+      await writeDraftArtifacts(root, baseDir, "v001-partial", draftV1);
+      options.onProgress?.(`Completing missing short fiction chapters: ${missingFromInitialDraft.join(", ")}...`);
+      draftV1 = await writer.continueDraft({
+        direction: options.direction,
+        outlineMarkdown,
+        chapterCount,
+        charsPerChapter,
+        draft: draftV1,
+      });
+    }
+    validateShortFictionDraftForFinal(draftV1, { expectedChapters: chapterCount });
+    await writeDraftArtifacts(root, baseDir, "v001", draftV1);
 
-  options.onProgress?.("Reviewing full draft...");
-  const draftReviewer = new ShortFictionDraftReviewerAgent(options.runtimes.draftReview);
-  const draftReview = await draftReviewer.reviewDraft({
-    direction: options.direction,
-    outlineMarkdown,
-    draft: draftV1,
-    chapterCount,
-    charsPerChapter,
-  });
-  await writeText(root, join(baseDir, "reviews", "draft-v001.md"), draftReview);
+    options.onProgress?.("Reviewing full draft...");
+    const draftReviewer = new ShortFictionDraftReviewerAgent(options.runtimes.draftReview);
+    const draftReview = await draftReviewer.reviewDraft({
+      direction: options.direction,
+      outlineMarkdown,
+      draft: draftV1,
+      chapterCount,
+      charsPerChapter,
+    });
+    await writeText(root, join(baseDir, "reviews", "draft-v001.md"), draftReview);
 
-  options.onProgress?.("Revising full draft once...");
-  const reviser = new ShortFictionDraftReviserAgent(options.runtimes.revise);
-  const draftV2 = await reviser.reviseDraft({
-    direction: options.direction,
-    outlineMarkdown,
-    draft: draftV1,
-    review: draftReview,
-    chapterCount,
-    charsPerChapter,
-  });
-  validateShortFictionDraftForFinal(draftV2, { expectedChapters: chapterCount });
-  await writeDraftArtifacts(root, baseDir, "v002", draftV2);
-  await writeFinalArtifacts(root, baseDir, draftV2);
+    finalDraft = draftV1;
+    options.onProgress?.("Revising full draft once...");
+    const reviser = new ShortFictionDraftReviserAgent(options.runtimes.revise);
+    try {
+      const draftV2 = await reviser.reviseDraft({
+        direction: options.direction,
+        outlineMarkdown,
+        draft: draftV1,
+        review: draftReview,
+        chapterCount,
+        charsPerChapter,
+      });
+      validateShortFictionDraftForFinal(draftV2, { expectedChapters: chapterCount });
+      await writeDraftArtifacts(root, baseDir, "v002", draftV2);
+      finalDraft = draftV2;
+    } catch (error) {
+      revisionWarning = error instanceof Error ? error.message : String(error);
+      await writeText(root, join(baseDir, "reviews", "draft-v002-warning.md"), [
+        "# 第二轮改稿未采用",
+        "",
+        "系统没有用不完整或解析失败的改稿覆盖完整首稿。",
+        "",
+        "## 原因",
+        "",
+        revisionWarning,
+      ].join("\n"));
+    }
 
-  options.onProgress?.("Generating synopsis and cover prompt...");
-  const packager = new ShortFictionPackagingAgent(options.runtimes.package);
-  const salesPackage = await packager.generatePackage({
-    direction: options.direction,
-    outlineMarkdown,
-    draft: draftV2,
-  });
-  await writePackageArtifacts(root, baseDir, salesPackage);
+    await writeFinalArtifacts(root, baseDir, finalDraft);
+
+    options.onProgress?.("Generating synopsis and cover prompt...");
+    const packager = new ShortFictionPackagingAgent(options.runtimes.package);
+    salesPackage = await packager.generatePackage({
+      direction: options.direction,
+      outlineMarkdown,
+      draft: finalDraft,
+    });
+    await writePackageArtifacts(root, baseDir, salesPackage);
+  } catch (error) {
+    await writeShortRunStatus(root, baseDir, {
+      status: "failed",
+      error: error instanceof Error ? error.message : String(error),
+    }).catch(() => undefined);
+    throw error;
+  }
 
   const coverArtifacts: { readonly coverImagePath?: string; readonly coverError?: string } = options.cover === false
     ? { coverError: "disabled" }
@@ -247,6 +288,13 @@ async function produceShort(
         coverSize: options.coverSize,
         coverApiKeyEnv: options.coverApiKeyEnv,
       }).catch((error: unknown) => ({ coverError: String(error) }));
+
+  if (revisionWarning) {
+    await writeShortRunStatus(root, baseDir, {
+      status: "complete",
+      warning: `revision skipped: ${revisionWarning}`,
+    }).catch(() => undefined);
+  }
 
   return buildShortRunResult(storyId, baseDir, coverArtifacts);
 }
@@ -388,6 +436,17 @@ async function writePackageArtifacts(root: string, baseDir: string, salesPackage
     salesPackage.coverPrompt,
   ].join("\n"));
   await writeText(root, join(finalDir, "cover-prompt.md"), salesPackage.coverPrompt || "(empty)");
+}
+
+async function writeShortRunStatus(
+  root: string,
+  baseDir: string,
+  value: Record<string, unknown>,
+): Promise<void> {
+  await writeJson(root, join(baseDir, "status.json"), {
+    ...value,
+    updatedAt: new Date().toISOString(),
+  });
 }
 
 async function generateCoverArtifact(input: {

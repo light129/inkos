@@ -3,6 +3,7 @@ import { countChapterLength } from "../utils/length-metrics.js";
 import {
   buildShortFictionDraftReviewSystemPrompt,
   buildShortFictionDraftReviewUserPrompt,
+  buildShortFictionDraftContinuationUserPrompt,
   buildShortFictionDraftRevisionFollowup,
   buildShortFictionOutlineReviewSystemPrompt,
   buildShortFictionOutlineReviewUserPrompt,
@@ -161,6 +162,32 @@ export class ShortFictionWriterAgent extends BaseAgent {
 
     return parseShortFictionBatchDraft(response.content, { expectedChapters: input.chapterCount });
   }
+
+  async continueDraft(input: ShortFictionDraftInput & { readonly draft: ShortFictionBatchDraft }): Promise<ShortFictionBatchDraft> {
+    const missingChapters = findEmptyShortFictionChapters(input.draft);
+    if (missingChapters.length === 0) return input.draft;
+
+    const response = await retryShortFictionCall(() =>
+      this.chat([
+        { role: "system", content: buildShortFictionWriterSystemPrompt() },
+        { role: "user", content: buildShortFictionDraftContinuationUserPrompt({
+          direction: input.direction,
+          outlineMarkdown: input.outlineMarkdown,
+          chapterCount: input.chapterCount,
+          charsPerChapter: input.charsPerChapter,
+          existingDraftMarkdown: renderShortFictionDraftMarkdown(input.draft),
+          missingChapters,
+        }) },
+      ], {
+        temperature: 0.68,
+        maxTokens: estimateShortFictionMaxTokens(missingChapters.length, input.charsPerChapter),
+      }), this.name, this.log);
+
+    return parseShortFictionBatchDraft(
+      `${input.draft.rawContent.trim()}\n\n${response.content.trim()}`,
+      { expectedChapters: input.chapterCount },
+    );
+  }
 }
 
 export class ShortFictionDraftReviewerAgent extends BaseAgent {
@@ -285,12 +312,16 @@ export function validateShortFictionDraftForFinal(
     throw new Error(`Short-hit draft is incomplete; expected ${options.expectedChapters} chapters, got ${draft.chapters.length}.`);
   }
 
-  const emptyChapters = draft.chapters
-    .filter((chapter) => !chapter.content.trim())
-    .map((chapter) => chapter.number);
+  const emptyChapters = findEmptyShortFictionChapters(draft);
   if (emptyChapters.length > 0) {
     throw new Error(`Short-hit draft is incomplete; empty chapters: ${emptyChapters.join(", ")}.`);
   }
+}
+
+export function findEmptyShortFictionChapters(draft: ShortFictionBatchDraft): number[] {
+  return draft.chapters
+    .filter((chapter) => !chapter.content.trim())
+    .map((chapter) => chapter.number);
 }
 
 export function renderShortFictionDraftMarkdown(draft: ShortFictionBatchDraft): string {

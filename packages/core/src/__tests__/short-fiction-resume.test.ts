@@ -23,6 +23,14 @@ ${Array.from({ length: CH }, (_, i) => `=== CHAPTER ${i + 1} TITLE ===
 === CHAPTER ${i + 1} CONTENT ===
 ${"深夜的电梯停在不存在的十三层，门开了。".repeat(20)}`).join("\n")}
 `;
+const PARTIAL_DRAFT_MD = `
+=== SHORT_FICTION_TITLE ===
+电梯多一层
+${Array.from({ length: 5 }, (_, i) => `=== CHAPTER ${i + 1} TITLE ===
+第${i + 1}章
+=== CHAPTER ${i + 1} CONTENT ===
+${"深夜的电梯停在不存在的十三层，门开了。".repeat(20)}`).join("\n")}
+`;
 
 function ctx(projectRoot: string) {
   return { client: { provider: "openai" } as never, model: "fake", projectRoot };
@@ -80,6 +88,53 @@ describe("short fiction resume + failure marker (C2)", () => {
     const status = JSON.parse(await readFile(join(root, "shorts", "elevator", "status.json"), "utf-8"));
     expect(status.status).toBe("failed");
     expect(status.error).toContain("503");
+  });
+
+  it("continues a truncated first draft before review instead of reviewing empty chapters", async () => {
+    await mkdir(join(root, "shorts", "elevator", "outline"), { recursive: true });
+    await writeFile(join(root, "shorts", "elevator", "outline", "v002.md"), "## 既有大纲", "utf-8");
+    const partial = parseShortFictionBatchDraft(PARTIAL_DRAFT_MD, { expectedChapters: CH });
+    const complete = parseShortFictionBatchDraft(DRAFT_MD, { expectedChapters: CH });
+    const continueDraft = vi.spyOn(ShortFictionWriterAgent.prototype, "continueDraft").mockResolvedValue(complete);
+    vi.spyOn(ShortFictionWriterAgent.prototype, "writeDraft").mockResolvedValue(partial);
+    vi.spyOn(ShortFictionDraftReviewerAgent.prototype, "reviewDraft").mockResolvedValue("looks fine");
+    vi.spyOn(ShortFictionDraftReviserAgent.prototype, "reviseDraft").mockResolvedValue(complete);
+    vi.spyOn(ShortFictionPackagingAgent.prototype, "generatePackage").mockResolvedValue({
+      title: "电梯多一层", intro: "钩子", sellingPoints: ["反转"], coverPrompt: "", rawContent: "",
+    });
+
+    await runShortFictionProduction({
+      projectRoot: root, direction: "恐怖短篇", storyId: "elevator",
+      chapterCount: CH, charsPerChapter: 1000, cover: false, runtimes: runtimes(root),
+    });
+
+    expect(continueDraft).toHaveBeenCalled();
+    await expect(access(join(root, "shorts", "elevator", "drafts", "v001-partial", "full.md"))).resolves.toBeUndefined();
+    const final = await readFile(join(root, "shorts", "elevator", "final", "full.md"), "utf-8");
+    expect(final).toContain("第12章");
+  });
+
+  it("keeps the complete first draft when the single revision output is invalid", async () => {
+    await mkdir(join(root, "shorts", "elevator", "outline"), { recursive: true });
+    await writeFile(join(root, "shorts", "elevator", "outline", "v002.md"), "## 既有大纲", "utf-8");
+    const complete = parseShortFictionBatchDraft(DRAFT_MD, { expectedChapters: CH });
+    const invalidRevision = parseShortFictionBatchDraft("=== SHORT_FICTION_TITLE ===\n空改稿", { expectedChapters: CH });
+    vi.spyOn(ShortFictionWriterAgent.prototype, "writeDraft").mockResolvedValue(complete);
+    vi.spyOn(ShortFictionDraftReviewerAgent.prototype, "reviewDraft").mockResolvedValue("looks fine");
+    vi.spyOn(ShortFictionDraftReviserAgent.prototype, "reviseDraft").mockResolvedValue(invalidRevision);
+    vi.spyOn(ShortFictionPackagingAgent.prototype, "generatePackage").mockResolvedValue({
+      title: "电梯多一层", intro: "钩子", sellingPoints: ["反转"], coverPrompt: "", rawContent: "",
+    });
+
+    await runShortFictionProduction({
+      projectRoot: root, direction: "恐怖短篇", storyId: "elevator",
+      chapterCount: CH, charsPerChapter: 1000, cover: false, runtimes: runtimes(root),
+    });
+
+    const warning = await readFile(join(root, "shorts", "elevator", "reviews", "draft-v002-warning.md"), "utf-8");
+    expect(warning).toContain("第二轮改稿未采用");
+    const finalJson = JSON.parse(await readFile(join(root, "shorts", "elevator", "final", "short-story.json"), "utf-8"));
+    expect(finalJson.chapters.every((chapter: { content: string }) => chapter.content.length > 0)).toBe(true);
   });
 
   it("returns the existing short untouched when final/full.md already exists (idempotent)", async () => {
