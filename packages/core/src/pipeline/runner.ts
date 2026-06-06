@@ -2366,8 +2366,8 @@ Base the analysis on the text's actual features, not generalities. Support each 
 
 分析必须基于原文实际特征，不要泛泛而谈。每个部分用1-2个原文例句佐证。`;
         const styleUserPrompt = lang === "en"
-          ? `Analyze the writing style of the following reference text:\n\n${sample.slice(0, 20000)}`
-          : `分析以下参考文本的写作风格：\n\n${sample.slice(0, 20000)}`;
+          ? `Analyze the writing style of the following reference text:\n\n${sample}`
+          : `分析以下参考文本的写作风格：\n\n${sample}`;
         const response = await chatCompletion(this.config.client, this.config.model, [
           { role: "system", content: styleSystemPrompt },
           { role: "user", content: styleUserPrompt },
