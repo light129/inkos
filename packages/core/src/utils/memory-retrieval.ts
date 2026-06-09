@@ -123,15 +123,24 @@ export async function retrieveMemorySelection(params: {
         memoryDb.replaceCurrentFacts(facts);
       }
 
+      // Structured/markdown hook state is authoritative because it preserves
+      // metadata the SQLite acceleration table does not. In migration/minimal
+      // projects that projection can be absent or empty while SQLite already
+      // has usable hook rows, so fall back only when the authority path yields
+      // no active hooks at all.
+      const effectiveActiveHooks = activeHooks.length > 0
+        ? activeHooks
+        : filterActiveHooks(memoryDb.getActiveHooks());
+
       return {
         summaries: selectRelevantSummaries(
           memoryDb.getSummaries(1, Math.max(1, params.chapterNumber - 1)),
           params.chapterNumber,
           narrativeQueryTerms,
         ),
-        hooks: selectRelevantHooks(activeHooks, narrativeQueryTerms, params.chapterNumber),
-        activeHooks,
-        recyclableHooks: computeRecyclableHooks(activeHooks, params.chapterNumber),
+        hooks: selectRelevantHooks(effectiveActiveHooks, narrativeQueryTerms, params.chapterNumber),
+        activeHooks: effectiveActiveHooks,
+        recyclableHooks: computeRecyclableHooks(effectiveActiveHooks, params.chapterNumber),
         facts: selectRelevantFacts(memoryDb.getCurrentFacts(), factQueryTerms),
         volumeSummaries,
         dbPath: join(storyDir, "memory.db"),
